@@ -1,0 +1,91 @@
+//@version=5
+indicator("Gaussian Process Regression on Moving Average", shorttitle="GPR_MA", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// Inputs
+lookback_period = input.int(100, 'Lookback Period', minval=0)
+prediction_horizon = input.int(30, 'Prediction Horizon', minval=0)
+length_scale = input.float(10., 'Length Scale', minval=1)
+noise_variance = input.float(0.1, step=0.01, minval=0)
+
+// Radial Basis Function for the kernel
+radial_basis_function(x1, x2, scale) => math.exp(-math.pow(x1 - x2, 2) / (2.0 * math.pow(scale, 2)))
+
+// Create a kernel matrix using the Radial Basis Function
+create_kernel_matrix(training_set, test_set, scale) =>
+    kernel_matrix = matrix.new<float>(array.size(training_set), array.size(test_set))
+    row_index = 0
+    for train_point in training_set
+        col_index = 0
+        for test_point in test_set
+            kernel_value = radial_basis_function(train_point, test_point, scale)
+            matrix.set(kernel_matrix, row_index, col_index, kernel_value)
+            col_index += 1
+        row_index += 1
+    kernel_matrix
+
+// Initialize identity matrix and prediction kernel
+var identity_matrix = matrix.new<float>(lookback_period, lookback_period, 0.0)
+var matrix<float> prediction_kernel = na
+
+// Set up initial training and test indices, noise matrix & compute the prediction kernel
+if barstate.isfirst
+    training_indices = array.new<int>(0)
+    test_indices = array.new<int>(0)
+    for i = 0 to lookback_period - 1
+        for j = 0 to lookback_period - 1
+            matrix.set(identity_matrix, i, j, i == j ? 1.0 : 0.0)
+        array.push(training_indices, i)
+    for i = 0 to lookback_period + prediction_horizon - 1
+        array.push(test_indices, i)
+    noise_matrix = matrix.mult(identity_matrix, noise_variance * noise_variance)
+    training_kernel = matrix.sum(create_kernel_matrix(training_indices, training_indices, length_scale), noise_matrix)
+    training_kernel_inv = matrix.pinv(training_kernel)
+    cross_kernel = create_kernel_matrix(training_indices, test_indices, length_scale)
+    prediction_kernel := matrix.mult(matrix.transpose(cross_kernel), training_kernel_inv)
+
+// Prepare the training outputs by calculating the moving average
+current_index = bar_index
+moving_average = ta.sma(close, lookback_period)
+training_outputs = array.new<float>(0)
+for i = 0 to lookback_period - 1
+    array.unshift(training_outputs, ta.sma(close[i], lookback_period) - moving_average)
+
+// Calculate the predicted means for the next day's moving average
+predicted_means = matrix.mult(prediction_kernel, training_outputs)
+
+// Loop through the predicted means to determine regression and forecast points
+index_offset = -lookback_period + 2
+var line[] regression_lines = array.new_line(0)
+var line[] forecast_lines = array.new_line(0)
+for i = 0 to array.size(predicted_means) - 1
+    predicted_mean = array.get(predicted_means, i) + moving_average
+    if index_offset == 1
+        array.push(forecast_lines, line.new(current_index + index_offset, predicted_mean, current_index + index_offset, predicted_mean, color=color.yellow, width=2))
+        array.push(regression_lines, line.new(current_index + index_offset, predicted_mean, current_index + index_offset, predicted_mean, color=color.purple, width=2))
+    else if index_offset > 1
+        array.push(forecast_lines, line.new(current_index + index_offset, predicted_mean, current_index + index_offset, predicted_mean, color=color.yellow, width=2))
+    else
+        array.push(regression_lines, line.new(current_index + index_offset, predicted_mean, current_index + index_offset, predicted_mean, color=color.purple, width=2))
+    index_offset += 1
+
+// Draw regression and forecast lines
+if barstate.islast
+    // Clear existing lines
+    for line_id in regression_lines
+        line.delete(line_id)
+    for line_id in forecast_lines
+        line.delete(line_id)
+    
+    // Draw regression lines
+    for i = 1 to array.size(regression_lines) - 1
+        line.set_xy1(array.get(regression_lines, i - 1), line.get_x1(array.get(regression_lines, i - 1)), line.get_y1(array.get(regression_lines, i - 1)))
+        line.set_xy2(array.get(regression_lines, i - 1), line.get_x1(array.get(regression_lines, i)), line.get_y1(array.get(regression_lines, i)))
+    
+    // Draw forecast lines
+    for i = 1 to array.size(forecast_lines) - 1
+        line.set_xy1(array.get(forecast_lines, i - 1), line.get_x1(array.get(forecast_lines, i - 1)), line.get_y1(array.get(forecast_lines, i - 1)))
+        line.set_xy2(array.get(forecast_lines, i - 1), line.get_x1(array.get(forecast_lines, i)), line.get_y1(array.get(forecast_lines, i)))
+
+// Predict the next day's price based on the predicted moving average
+predicted_ma_next_day = array.get(predicted_means, array.size(predicted_means) - 1)
+plot(predicted_ma_next_day, title="Predicted 200-Day MA", color=color.red, linewidth=2)

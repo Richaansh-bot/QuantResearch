@@ -1,0 +1,2 @@
+# QuantResearch
+Fun with PineScript
